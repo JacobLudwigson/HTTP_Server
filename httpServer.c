@@ -8,6 +8,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <arpa/inet.h>
+#include <signal.h>
 // #include <POSIX.h>
 // TO - DO
 // Implement sig handler for graceful Ctrl + C exit (if dynamically allocating memory)
@@ -15,8 +16,8 @@
 // 
 
 #define ERROR -1
-#define MAX_CLIENTS 1000 //Maybe?
-#define MAX_DATA 4096 //Maybe?
+#define MAX_CLIENTS 100000 //Maybe?
+#define MAX_DATA 2048 //Maybe?
 #define LINETERMINATOR "\r\n"
 #define HEADERSEPARATOR "\r\n\r\n"
 int countActiveThreads;
@@ -24,7 +25,7 @@ typedef struct httpPacket{
     unsigned char* data;
     int status;
     int contentLength;
-    char requestType[20];
+    char requestType[50];
     char pageRequest[50];
     char statusMessage[20];
     char httpVersion[50];
@@ -32,7 +33,21 @@ typedef struct httpPacket{
     char connection[100];
     char contentType[150];
 }httpPacket;
+void killHandler(int sig){
+    signal(sig, SIG_IGN);
+    printf("\nFinishing serving clients...\n");
+    printf("There are currently %d clients with a persistant connection\n", countActiveThreads);
 
+    int cycles = 0;
+    while (countActiveThreads >= 1){
+        sleep(1);
+        if (cycles >= 10){
+            exit(1);
+        }
+        cycles+=1;
+    }
+    exit(1);
+}
 const char* get_content_type(const char* filename) {
     if (strstr(filename, ".html") != NULL || strstr(filename, ".htm") != NULL) {
         return "text/html";
@@ -54,21 +69,6 @@ const char* get_content_type(const char* filename) {
         return "application/octet-stream";
     }
 }
-void printPacket(struct httpPacket* packet){
-    printf(
-        "%s %d %s\r\n"
-        "Host: %s\r\n"
-        "Connection: %s\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %d\r\n"
-        "\r\n",
-        packet->httpVersion, packet->status, packet->statusMessage,
-        packet->host,
-        packet->connection,
-        packet->contentType,
-        packet->contentLength
-    );
-}
 int formulateHttpPacket(struct httpPacket* packet, char* buffer, size_t bufferSize){
     int len = snprintf(buffer, bufferSize,
         "%s %d %s\r\n"
@@ -83,40 +83,56 @@ int formulateHttpPacket(struct httpPacket* packet, char* buffer, size_t bufferSi
         packet->contentType ? packet->contentType : "",
         packet->contentLength ? packet->contentLength : 0
     );
+    if (packet->contentLength + len >= bufferSize){
+        printf("Insufficient Packet Length! Total Packet Size: %d, Buffer Size: %ld\n", packet->contentLength+len, bufferSize);
+        return 0;
+    }
+
     memcpy(buffer + len, packet->data, packet->contentLength);
     return len + packet->contentLength;
 }
 int decodeHttpPacket(struct httpPacket* packet, char* buffer, size_t bufferLength ){
+    if (!buffer) {
+        printf("Invalid Buffer!\n");
+        return 0;
+    }
     int count = 0;
     char* line = strtok(buffer, "\r\n");
     int status;
     char first[50];
     char second[1024];
+    if (line && sscanf(line, "%49s %49s %49s",packet->requestType, packet->pageRequest, packet->httpVersion) != 3){
+        printf("Invalid Scan 1!\n");
+        return 0;
 
-    sscanf(line, "%s %s %s",packet->requestType, packet->pageRequest, packet->httpVersion);
-    // line = strtok(NULL, "\r\n");
+    }
     while ((line = strtok(NULL, "\r\n")) != NULL){
-        if (strcmp(line,"") == 0 || line == NULL){
+        if (strcmp(line,"") == 0 || line == NULL || strcmp(line,"\r\n")){
             break;
         }
-        sscanf(line, "%s %s", first,second);
+        if (sscanf(line, "%s %s", first,second) != 2){
+            printf("Invalid Scan 2!\n");
+            return 0;
+        } 
+
         first[strlen(first)-1] = '\0';
         if (strcmp(first, "Host") == 0){
-            count += 1;
+            // count += 1;
             strcpy(packet->host, second);
         }
         else if (strcmp(first, "Connection") == 0){
-            count += 1;
+            // count += 1;
             strcpy(packet->connection, second);
         }
         else if (strcmp(first, "Accept") == 0){
-            count += 1;
+            // count += 1;
             strcpy(packet->contentType, second);
         }
     }
-    return count == 3;
+    return 1;
 }
 void errorPacket(int errorCode, struct httpPacket* responsePacket){
+    strcpy(responsePacket->connection, "close");
     strcpy(responsePacket->contentType, "text/html");
     responsePacket->status = errorCode;
     return;
@@ -132,6 +148,7 @@ void buildResponsePacket(struct httpPacket* requestPacket, struct httpPacket* re
         return;
     }
     if (strcmp(requestPacket->httpVersion, "HTTP/1.1") != 0 && strcmp(requestPacket->httpVersion,"HTTP/1.0") != 0){
+        strcpy(responsePacket->httpVersion,"HTTP/1.1");
         errorPacket(500, responsePacket);
     }
     if (strcmp(requestPacket->pageRequest,"/") == 0){
@@ -149,20 +166,16 @@ void buildResponsePacket(struct httpPacket* requestPacket, struct httpPacket* re
         errorPacket(403, responsePacket);
         return;
     }
-    if (strcmp(requestPacket->connection, "keep-alive") != 0){
-        strcpy(responsePacket->connection,"Close");
+    if (strcmp(requestPacket->connection, "keep-alive") == 0){
+        strcpy(responsePacket->connection,"keep-alive");
     }
     else{
-        strcpy(responsePacket->connection,"keep-alive");
+        strcpy(responsePacket->connection,"close");
     }
     fseek(fptr,0, SEEK_END);
     long int fileSize = ftell(fptr);
     rewind(fptr);
     unsigned char* buffer = (unsigned char*) malloc(fileSize+1);
-    if (buffer == NULL){
-        perror("Error in memory allocation: ");
-        exit(-1);
-    }
     long int bytesRead = fread(buffer,sizeof(char), fileSize,fptr);
     if (fileSize != bytesRead){
         printf("File read, supposed to read %ld bytes and actually read %ld\n",fileSize, bytesRead);
@@ -178,16 +191,11 @@ void buildResponsePacket(struct httpPacket* requestPacket, struct httpPacket* re
     responsePacket->status = 200;
     return;
 }
-// int exitError(dynMem memory){
-
-// }
 //ALL FIELDS OF PACKETS ARE THIS FUNCTIONS JOB TO FREE (I.E. A BUFFER WILL BE ALLOCATED FOR "data" SECTION OF HTTP PACKET THAT WILL NOT HAVE A COORESPONDING FREE)
 void* serveClient(void* data){
     countActiveThreads+=1;
-    int socket = *(int*)data;
-    // printf("New thread with socket %d\n", socket);
+    int socket = (int)(intptr_t)data;
 
-    char buffer[MAX_DATA];
     char* responseBuffer;
 
     int data_len = 1;
@@ -195,24 +203,10 @@ void* serveClient(void* data){
     int decodeStatus;
     int length = 0;
     int bytesSent;
+
+    char* buffer = calloc(1,MAX_DATA);
     struct httpPacket* requestPacket = (httpPacket*) calloc(1, sizeof(httpPacket));
     struct httpPacket* responsePacket= (httpPacket*) calloc(1, sizeof(httpPacket));
-    struct timeval timeout;      
-    timeout.tv_sec = 10;
-    timeout.tv_usec = 0;
-    int op = 1;
-    if (setsockopt(socket, SOL_SOCKET,SO_REUSEADDR, &op, sizeof(op)) < 0){
-        perror("Error setting sock op: ");
-        free(responsePacket);
-        free(requestPacket);
-        return NULL;
-    }
-    if (setsockopt (socket, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                sizeof timeout) < 0)
-        perror("setsockopt failed\n");
-        free(responsePacket);
-        free(requestPacket);
-        return NULL;
     do {
         data_len = recv(socket, buffer,MAX_DATA,0);
         if (data_len < 0) {
@@ -221,45 +215,46 @@ void* serveClient(void* data){
         }
         decodeStatus = decodeHttpPacket(requestPacket, buffer, data_len);
         buildResponsePacket(requestPacket, responsePacket, decodeStatus);
-        length = 1024 + responsePacket->contentLength + 1;
-        responseBuffer = (unsigned char*)calloc(1,length);
+        length = MAX_DATA/2 + responsePacket->contentLength + 1;
+        responseBuffer = (unsigned char*) calloc(1,length);
         length = formulateHttpPacket(responsePacket,responseBuffer, length);
         bytesSent = send(socket, responseBuffer, length,0);
+        persistant = (strcmp(responsePacket->connection,"keep-alive") == 0);
+        printf("Sending with status: %d\n", responsePacket->status);
+        if (bytesSent < 0) {
+            printf("Send timeout, returning...\n");
+            free(responseBuffer);
+            break;
+        }
         if (bytesSent != length){
             printf("Error in thread with socket %d\n\n", socket);
-
+            printf("Sent %d/%d bytes\n", bytesSent,length);
             perror("Error in send ");
-            return NULL;
+            free(responseBuffer);
+            break;
         }
         else{
-            printf("Served: %s\n", requestPacket->pageRequest);
-        }
-        if (strcmp(responsePacket->connection,"keep-alive")){
-            persistant = 1;
-        }
-        else{
-            persistant = 0;
+            printf("Served: %s\n\n", requestPacket->pageRequest);
         }
         if (requestPacket->data){
             free(requestPacket->data);
+            requestPacket->data = NULL;
         }
         if (responsePacket->data){
             free(responsePacket->data);
+            responsePacket->data = NULL;
         }
         free(responseBuffer);
+        responseBuffer = NULL;
         memset(buffer,0,MAX_DATA);
     }while(persistant);
-    if (requestPacket->data){
-        free(requestPacket->data);
-    }
-    if (responsePacket->data){
-        free(responsePacket->data);
-    }
+    if (requestPacket->data)free(requestPacket->data);
+    if (responsePacket->data)free(responsePacket->data);
+    free(buffer);
     free(responsePacket);
     free(requestPacket);
     close(socket);
     countActiveThreads -=1;
-    // printf("Exiting thread with socket %d\n\n", socket);
     return NULL;
 }
 int main(int argc, char **argv){
@@ -303,6 +298,7 @@ int main(int argc, char **argv){
     }
     char ip_str[INET_ADDRSTRLEN];
     countActiveThreads = 0;
+    signal(SIGINT, killHandler);
     while (1){
         if ((new = accept(sock, (struct sockaddr *) &client, &socketaddr_len)) == ERROR){
             //input error handling
@@ -313,14 +309,26 @@ int main(int argc, char **argv){
             perror("inet_ntop error");
             // handle error as needed
         }
-        printf("Handling Client Connected from port no %d and IP %s\n",ntohs(client.sin_port), ip_str);
-        printf("Accepted connection, client_fd = %d\n", new);
-        printf("Current Active Threads %d\n",countActiveThreads);
+        struct timeval timeout;      
+        timeout.tv_sec = 10;
+        timeout.tv_usec = 0;
+        if (setsockopt (new, SOL_SOCKET, SO_RCVTIMEO, &timeout,sizeof timeout) < 0 || setsockopt (new, SOL_SOCKET, SO_SNDTIMEO, &timeout,sizeof timeout) < 0){
+            close(new);
+            perror("setsockopt failed ");
+        }
+        else{
+            void* data = (void*)(intptr_t)new;
+            pthread_t ptid;
+            pthread_create(&ptid, NULL, &serveClient, data);
+            pthread_detach(ptid);
+        }
 
-        void* data = &new;
-        pthread_t ptid;
-        pthread_create(&ptid, NULL, &serveClient, data);
-        pthread_detach(ptid);
+
+        printf("\n\nHandling Client Connected from port no %d and IP %s\n",ntohs(client.sin_port), ip_str);
+        // printf("Accepted connection, client_fd = %d\n", new);
+        // printf("Current Active Threads %d\n\n",countActiveThreads);
+
+
     }
     close(sock);
 }
