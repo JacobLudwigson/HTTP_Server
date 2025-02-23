@@ -10,12 +10,6 @@
 #include <arpa/inet.h>
 #include <signal.h>
 #include <stdatomic.h>
-// #include <POSIX.h>
-// TO - DO
-// Implement sig handler for graceful Ctrl + C exit (if dynamically allocating memory)
-// Persistant connections using setsockop for 10 seconds
-// 
-
 #define ERROR -1
 #define MAX_CLIENTS 100000 //Maybe?
 #define MAX_DATA 2048 //Maybe?
@@ -38,7 +32,6 @@ void killHandler(int sig){
     signal(sig, SIG_IGN);
     printf("\nFinishing serving clients...\n");
     printf("There are currently %d clients with a persistant connection\n", countActiveThreads);
-
     int cycles = 0;
     while (countActiveThreads >= 1){
         sleep(1);
@@ -88,7 +81,6 @@ int formulateHttpPacket(struct httpPacket* packet, char* buffer, size_t bufferSi
         printf("Insufficient Packet Length! Total Packet Size: %d, Buffer Size: %ld\n", packet->contentLength+len, bufferSize);
         return 0;
     }
-
     memcpy(buffer + len, packet->data, packet->contentLength);
     return len + packet->contentLength;
 }
@@ -105,7 +97,6 @@ int decodeHttpPacket(struct httpPacket* packet, char* buffer, size_t bufferLengt
     if (line && sscanf(line, "%49s %49s %49s",packet->requestType, packet->pageRequest, packet->httpVersion) != 3){
         printf("Invalid Scan 1!\n");
         return 0;
-
     }
     while ((line = strtok(NULL, "\r\n")) != NULL){
         if (strcmp(line,"") == 0 || line == NULL || strcmp(line,"\r\n")){
@@ -115,18 +106,14 @@ int decodeHttpPacket(struct httpPacket* packet, char* buffer, size_t bufferLengt
             printf("Invalid Scan 2!\n");
             return 0;
         } 
-
         first[strlen(first)-1] = '\0';
         if (strcmp(first, "Host") == 0){
-            // count += 1;
             strcpy(packet->host, second);
         }
         else if (strcmp(first, "Connection") == 0){
-            // count += 1;
             strcpy(packet->connection, second);
         }
         else if (strcmp(first, "Accept") == 0){
-            // count += 1;
             strcpy(packet->contentType, second);
         }
     }
@@ -171,7 +158,12 @@ void buildResponsePacket(struct httpPacket* requestPacket, struct httpPacket* re
         strcpy(responsePacket->connection,"keep-alive");
     }
     else{
-        strcpy(responsePacket->connection,"close");
+        if (!strcmp(responsePacket->connection, "") && !strcmp(responsePacket->httpVersion, "HTTP/1.1")){
+            strcpy(responsePacket->connection,"keep-alive");
+        } 
+        else{
+            strcpy(responsePacket->connection,"close");
+        }
     }
     fseek(fptr,0, SEEK_END);
     long int fileSize = ftell(fptr);
@@ -188,7 +180,6 @@ void buildResponsePacket(struct httpPacket* requestPacket, struct httpPacket* re
     buffer[bytesRead] = '\0';
     responsePacket->data = buffer;
     fclose(fptr);
-
     responsePacket->status = 200;
     return;
 }
@@ -196,15 +187,12 @@ void buildResponsePacket(struct httpPacket* requestPacket, struct httpPacket* re
 void* serveClient(void* data){
     atomic_fetch_add(&countActiveThreads,1);
     int socket = (int)(intptr_t)data;
-
     char* responseBuffer;
-
     int data_len = 1;
     int persistant = 0;
     int decodeStatus;
     int length = 0;
     int bytesSent;
-
     char* buffer = calloc(1,MAX_DATA);
     struct httpPacket* requestPacket = (httpPacket*) calloc(1, sizeof(httpPacket));
     struct httpPacket* responsePacket= (httpPacket*) calloc(1, sizeof(httpPacket));
@@ -270,10 +258,7 @@ int main(int argc, char **argv){
     int socketaddr_len = sizeof(struct sockaddr_in);
     int data_len;
     char data[MAX_DATA];
-
-
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == ERROR){
-        //Error handling if socket cant open
         perror("Error in socket : ");
         exit(-1);
     }
@@ -287,13 +272,11 @@ int main(int argc, char **argv){
     server.sin_addr.s_addr = INADDR_ANY;
     bzero(&server.sin_zero,8);
     if ((bind(sock, (struct sockaddr* )&server, socketaddr_len)) == ERROR){
-        //Error binding to socket
         perror("Error in bind : ");
         exit(-1);
     }
 
     if ((listen(sock, MAX_CLIENTS)) == -1){
-        //Error in listen
         perror("Error in listen : ");
         exit(-1);
     }
@@ -302,13 +285,11 @@ int main(int argc, char **argv){
     signal(SIGINT, killHandler);
     while (1){
         if ((new = accept(sock, (struct sockaddr *) &client, &socketaddr_len)) == ERROR){
-            //input error handling
             perror("Error in accept : ");
             exit(-1);
         }
         if (inet_ntop(AF_INET, &client.sin_addr, ip_str, sizeof(ip_str)) == NULL) {
             perror("inet_ntop error");
-            // handle error as needed
         }
         struct timeval timeout;      
         timeout.tv_sec = 10;
@@ -323,13 +304,7 @@ int main(int argc, char **argv){
             pthread_create(&ptid, NULL, &serveClient, data);
             pthread_detach(ptid);
         }
-
-
         printf("\n\nHandling Client Connected from port no %d and IP %s\n",ntohs(client.sin_port), ip_str);
-        // printf("Accepted connection, client_fd = %d\n", new);
-        // printf("Current Active Threads %d\n\n",countActiveThreads);
-
-
     }
     close(sock);
 }
