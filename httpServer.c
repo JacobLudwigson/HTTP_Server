@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <stdatomic.h>
 // #include <POSIX.h>
 // TO - DO
 // Implement sig handler for graceful Ctrl + C exit (if dynamically allocating memory)
@@ -20,7 +21,7 @@
 #define MAX_DATA 2048 //Maybe?
 #define LINETERMINATOR "\r\n"
 #define HEADERSEPARATOR "\r\n\r\n"
-int countActiveThreads;
+atomic_int countActiveThreads;
 typedef struct httpPacket{ 
     unsigned char* data;
     int status;
@@ -193,7 +194,7 @@ void buildResponsePacket(struct httpPacket* requestPacket, struct httpPacket* re
 }
 //ALL FIELDS OF PACKETS ARE THIS FUNCTIONS JOB TO FREE (I.E. A BUFFER WILL BE ALLOCATED FOR "data" SECTION OF HTTP PACKET THAT WILL NOT HAVE A COORESPONDING FREE)
 void* serveClient(void* data){
-    countActiveThreads+=1;
+    atomic_fetch_add(&countActiveThreads,1);
     int socket = (int)(intptr_t)data;
 
     char* responseBuffer;
@@ -254,7 +255,7 @@ void* serveClient(void* data){
     free(responsePacket);
     free(requestPacket);
     close(socket);
-    countActiveThreads -=1;
+    atomic_fetch_sub(&countActiveThreads,1);
     return NULL;
 }
 int main(int argc, char **argv){
